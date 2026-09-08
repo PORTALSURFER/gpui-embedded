@@ -60,11 +60,38 @@ mod native {
                 },
                 None,
             )?;
-            let scene = gpui::Scene::default();
+            let mut scene = gpui::Scene::default();
+            let bounds = gpui::Bounds::new(
+                gpui::point(gpui::ScaledPixels(0.0), gpui::ScaledPixels(0.0)),
+                gpui::size(gpui::ScaledPixels(208.0), gpui::ScaledPixels(212.0)),
+            );
+            scene.insert_primitive(gpui::Quad {
+                bounds,
+                content_mask: gpui::ContentMask { bounds },
+                background: gpui::rgb(0xff0000).into(),
+                ..Default::default()
+            });
+            scene.finish();
             assert!(renderer.draw(&scene), "initial frame must present");
+            let rgba = renderer.render_to_rgba(&scene)?;
+            assert_eq!(rgba.len(), 208 * 212 * 4);
+            for pixel in rgba.chunks_exact(4) {
+                assert_eq!(
+                    pixel,
+                    &[255, 0, 0, 255],
+                    "readback must preserve RGBA channel order and row padding"
+                );
+            }
             renderer
                 .update_drawable_size(gpui::size(gpui::DevicePixels(240), gpui::DevicePixels(240)));
             assert!(renderer.draw(&scene), "resized frame must present");
+            let rgba = renderer.render_to_rgba(&scene)?;
+            assert_eq!(rgba.len(), 240 * 240 * 4);
+            assert_eq!(
+                &rgba[rgba.len() - 4..],
+                &[0, 0, 0, 0],
+                "resized capture must preserve cleared pixels outside the scene"
+            );
             renderer.destroy();
             drop(renderer);
             drop(context);
@@ -74,7 +101,9 @@ mod native {
             let _: () = msg_send![window, release];
             pool.drain();
         }
-        println!("PASS explicit CAMetalLayer GPUI renderer create, draw, resize, teardown");
+        println!(
+            "PASS explicit CAMetalLayer GPUI renderer create, draw, RGBA capture, resize, teardown"
+        );
         Ok(())
     }
 }

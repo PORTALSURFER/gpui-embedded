@@ -1110,7 +1110,26 @@ impl WgpuRenderer {
         self.max_texture_size
     }
 
+    /// Render a scene into tightly packed RGBA8 pixels without presenting it.
+    /// This synchronously waits for GPU readback and is intended for visual tests.
+    pub fn render_to_rgba(&mut self, scene: &Scene) -> anyhow::Result<Vec<u8>> {
+        let mut output = None;
+        anyhow::ensure!(
+            self.draw_frame(scene, Some(&mut output)),
+            "scene did not render"
+        );
+        output.ok_or_else(|| anyhow::anyhow!("scene readback was not produced"))?
+    }
+
     pub fn draw(&mut self, scene: &Scene) -> bool {
+        self.draw_frame(scene, None)
+    }
+
+    fn draw_frame(
+        &mut self,
+        scene: &Scene,
+        mut capture: Option<&mut Option<anyhow::Result<Vec<u8>>>>,
+    ) -> bool {
         // Bail out early if the surface has been unconfigured (e.g. during
         // Android background/rotation transitions).  Attempting to acquire
         // a texture from an unconfigured surface can block indefinitely on
@@ -1145,42 +1164,66 @@ impl WgpuRenderer {
 
         self.atlas.before_frame();
 
-        let frame = match self.resources().surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                // Textures must be destroyed before the surface can be reconfigured.
-                drop(frame);
-                let surface_config = self.surface_config.clone();
-                let resources = self.resources_mut();
-                resources
-                    .surface
-                    .configure(&resources.device, &surface_config);
-                return false;
-            }
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                let surface_config = self.surface_config.clone();
-                let resources = self.resources_mut();
-                resources
-                    .surface
-                    .configure(&resources.device, &surface_config);
-                return false;
-            }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return false;
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                *self.last_error.lock().unwrap() =
-                    Some("Surface texture validation error".to_string());
-                return false;
-            }
+        let frame = if capture.is_some() {
+            None
+        } else {
+            Some(match self.resources().surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+                wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                    // Textures must be destroyed before the surface can be reconfigured.
+                    drop(frame);
+                    let surface_config = self.surface_config.clone();
+                    let resources = self.resources_mut();
+                    resources
+                        .surface
+                        .configure(&resources.device, &surface_config);
+                    return false;
+                }
+                wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                    let surface_config = self.surface_config.clone();
+                    let resources = self.resources_mut();
+                    resources
+                        .surface
+                        .configure(&resources.device, &surface_config);
+                    return false;
+                }
+                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                    return false;
+                }
+                wgpu::CurrentSurfaceTexture::Validation => {
+                    *self.last_error.lock().unwrap() =
+                        Some("Surface texture validation error".to_string());
+                    return false;
+                }
+            })
         };
 
         // Now that we know the surface is healthy, ensure intermediate textures exist
         self.ensure_intermediate_textures();
 
-        let frame_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let offscreen = capture.as_ref().map(|_| {
+            self.resources()
+                .device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("GPUI visual test target"),
+                    size: wgpu::Extent3d {
+                        width: self.surface_config.width,
+                        height: self.surface_config.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: self.surface_config.format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                })
+        });
+        let texture = offscreen
+            .as_ref()
+            .or_else(|| frame.as_ref().map(|frame| &frame.texture))
+            .expect("render target exists");
+        let frame_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let gamma_params = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,
@@ -1351,8 +1394,10 @@ impl WgpuRenderer {
                         "instance buffer size grew too large: {}",
                         self.instance_buffer_capacity
                     );
-                    frame.present();
-                    return true;
+                    if let Some(frame) = frame {
+                        frame.present();
+                    }
+                    return capture.is_none();
                 }
                 self.grow_instance_buffer();
                 continue;
@@ -1361,9 +1406,81 @@ impl WgpuRenderer {
             self.resources()
                 .queue
                 .submit(std::iter::once(encoder.finish()));
-            frame.present();
+            if let Some(output) = capture.as_mut() {
+                **output = Some(self.read_rgba(texture));
+            }
+            if let Some(frame) = frame {
+                frame.present();
+            }
             return true;
         }
+    }
+
+    fn read_rgba(&self, texture: &wgpu::Texture) -> anyhow::Result<Vec<u8>> {
+        use std::time::Duration;
+        let bgra = match self.surface_config.format {
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => true,
+            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => false,
+            format => anyhow::bail!("unsupported capture texture format: {format:?}"),
+        };
+        let width = self.surface_config.width;
+        let height = self.surface_config.height;
+        let row_bytes = width
+            .checked_mul(4)
+            .ok_or_else(|| anyhow::anyhow!("capture width overflow"))?;
+        let padded = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let resources = self.resources();
+        let buffer = resources.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("GPUI visual test readback"),
+            size: u64::from(padded) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = resources
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let submission = resources.queue.submit([encoder.finish()]);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        resources.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(Duration::from_secs(10)),
+        })?;
+        receiver.recv_timeout(Duration::from_secs(10))??;
+        let mapped = buffer.slice(..).get_mapped_range();
+        let mut pixels = Vec::with_capacity(row_bytes as usize * height as usize);
+        for row in mapped.chunks_exact(padded as usize) {
+            pixels.extend_from_slice(&row[..row_bytes as usize]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        if bgra {
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+        }
+        Ok(pixels)
     }
 
     fn draw_quads(
