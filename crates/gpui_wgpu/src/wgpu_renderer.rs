@@ -202,6 +202,34 @@ impl WgpuRenderer {
             raw_window_handle: window_handle.as_raw(),
         };
 
+        // The same native-handle lifetime contract applies to both constructors.
+        unsafe {
+            Self::new_with_surface_target(gpu_context, window, target, config, compositor_gpu)
+        }
+    }
+
+    /// Creates a renderer on an explicitly supplied native surface.
+    ///
+    /// Embedders can supply an owned Core Animation layer instead of asking WGPU
+    /// to create a layer from an AppKit view. This keeps native layer ownership
+    /// with the embedder and avoids process-global native class registration in
+    /// independently loaded plugin libraries. `window` supplies the display used
+    /// when creating the shared GPU instance.
+    ///
+    /// # Safety
+    /// The caller must uphold the requirements of `target` and keep its native
+    /// resources and the display alive until this renderer has been destroyed.
+    #[cfg(not(target_family = "wasm"))]
+    pub unsafe fn new_with_surface_target<W>(
+        gpu_context: GpuContext,
+        window: &W,
+        target: wgpu::SurfaceTargetUnsafe,
+        config: WgpuSurfaceConfig,
+        compositor_gpu: Option<CompositorGpuHint>,
+    ) -> anyhow::Result<Self>
+    where
+        W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
+    {
         // Use the existing context's instance if available, otherwise create a new one.
         // The surface must be created with the same instance that will be used for
         // adapter selection, otherwise wgpu will panic.
@@ -211,9 +239,8 @@ impl WgpuRenderer {
             .map(|ctx| ctx.instance.clone())
             .unwrap_or_else(|| WgpuContext::instance(Box::new(window.clone())));
 
-        // Safety: The caller guarantees that the window handle is valid for the
-        // lifetime of this renderer. In practice, the RawWindow struct is created
-        // from the native window handles and the surface is dropped before the window.
+        // Safety: The caller guarantees the target's native resources and
+        // display remain valid until the renderer releases the surface.
         let surface = unsafe {
             instance
                 .create_surface_unsafe(target)
