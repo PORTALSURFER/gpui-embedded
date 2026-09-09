@@ -49,6 +49,10 @@ js-sys = "0.3"
 [dev-dependencies]
 criterion.workspace = true
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+cocoa = "0.26"
+objc = "0.2.7"
+
 [[bench]]
 name = "layout_line"
 harness = false
