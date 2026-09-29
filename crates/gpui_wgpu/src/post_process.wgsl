@@ -104,6 +104,19 @@ fn signal_dots(pixel: vec2<f32>, center: vec2<f32>, reach: f32, weight: f32) -> 
     return dot * field * weight;
 }
 
+// The same fixed grid responds to one expanding drop wavefront. Only dot size
+// and opacity change; their positions remain aligned with the hover grid.
+fn signal_ring_dots(pixel: vec2<f32>, center: vec2<f32>,
+                    radius: f32, width: f32, weight: f32) -> f32 {
+    let cell = floor(pixel / 16.0);
+    let node = (cell + vec2<f32>(0.5)) * 16.0;
+    let distance = length((node - center) * vec2<f32>(1.0, 1.15));
+    let field = exp(-pow((distance - radius) / width, 2.0));
+    let dot_radius = 0.75 + field * 5.2;
+    let dot = 1.0 - smoothstep(dot_radius - 0.7, dot_radius + 0.7, length(pixel - node));
+    return dot * field * weight;
+}
+
 // Soft, asymmetric lensing gives each influence the shape of a liquid blob.
 fn liquid_blob(pixel: vec2<f32>, center: vec2<f32>, axes: vec2<f32>,
                weight: f32, phase: f32) -> vec3<f32> {
@@ -112,6 +125,15 @@ fn liquid_blob(pixel: vec2<f32>, center: vec2<f32>, axes: vec2<f32>,
     let flow = vec2<f32>(local.x + sin(local.y * 2.0 + phase) * 0.24,
                          local.y + cos(local.x * 1.8 - phase) * 0.20);
     return vec3<f32>(flow * cloud * 11.0, cloud);
+}
+
+fn liquid_ring(pixel: vec2<f32>, center: vec2<f32>,
+               radius: f32, width: f32, weight: f32) -> vec3<f32> {
+    let delta = pixel - center;
+    let distance = length(delta * vec2<f32>(1.0, 1.15));
+    let wavefront = exp(-pow((distance - radius) / width, 2.0)) * weight;
+    let direction = delta / max(length(delta), 1.0);
+    return vec3<f32>(direction * wavefront * 10.0, wavefront);
 }
 
 // The signal shader blurs and refracts the framebuffer under broad, fading
@@ -150,16 +172,20 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
             dots = max(dots, signal_dots(pixel, center, 108.0 + wake.z * 42.0, life * 0.46));
         }
     }
-    if (effect.impact.w > 0.5 && effect.impact.z < 1.15) {
+    if (effect.impact.w > 0.5 && effect.impact.z < 1.45) {
         let age = effect.impact.z;
-        let life = pow(max(1.0 - age / 1.15, 0.0), 2.0);
+        let life = pow(max(1.0 - age / 1.45, 0.0), 1.5);
         let center = effect.impact.xy * dimensions;
+        let radius = age * 280.0;
+        let width = 58.0 + age * 24.0;
         let blob = liquid_blob(pixel, center,
                                vec2<f32>(110.0 + age * 105.0, 90.0 + age * 78.0),
-                               life * 1.2, age * 2.4);
-        offset += blob.xy;
-        energy += blob.z;
-        dots = max(dots, signal_dots(pixel, center, 90.0 + age * 180.0, life * 0.62));
+                               life * 0.55, age * 2.4);
+        let ring = liquid_ring(pixel, center, radius, width, life * 1.15);
+        offset += blob.xy + ring.xy;
+        energy += blob.z + ring.z;
+        dots = max(dots, signal_dots(pixel, center, 90.0 + age * 80.0, life * 0.16));
+        dots = max(dots, signal_ring_dots(pixel, center, radius, width, life * 0.68));
     }
     if (energy < 0.001 && dots < 0.001) { return original; }
 
