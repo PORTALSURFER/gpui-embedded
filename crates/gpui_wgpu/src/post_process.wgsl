@@ -92,19 +92,17 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
     return mix(original, refracted, edge_fade);
 }
 
-// Stable screen-space nodes: the grid never translates. Each node grows near
-// an active blob, then its brightness fades with the trailing wake.
-fn signal_dots(pixel: vec2<f32>, center: vec2<f32>, reach: f32, weight: f32, age: f32, phase: f32) -> f32 {
-    let cell = floor(pixel / 16.0);
-    let node = (cell + vec2<f32>(0.5)) * 16.0;
+// A hidden fixed grid rises under the pointer, then sinks back to zero radius.
+// Compact spatial support and a short size response avoid leaving a painted path.
+fn signal_dots(pixel: vec2<f32>, center: vec2<f32>, reach: f32, weight: f32, age: f32) -> f32 {
+    let node = (floor(pixel / 16.0) + vec2<f32>(0.5)) * 16.0;
     let distance = length((node - center) * vec2<f32>(1.0, 1.15));
-    let field = exp(-pow(distance / reach, 2.0));
-    // A damped spring settles behind the pointer. Spatial phase keeps adjacent
-    // nodes coherent while avoiding a uniform, mechanical pulse.
-    let bounce = 1.0 + 0.26 * exp(-age * 3.2) * sin(age * 18.0 - distance * 0.018 + phase);
-    let radius = min(0.85 + field * 6.7 * bounce, 7.35);
+    let field = 1.0 - smoothstep(0.0, reach, distance);
+    let settle = 1.0 - smoothstep(0.02, 0.36, age);
+    let bounce = 1.0 + 0.14 * exp(-age * 8.0) * sin(age * 22.0);
+    let radius = min(field * settle * bounce * 7.1, 7.35);
     let dot = 1.0 - smoothstep(radius - 0.7, radius + 0.7, length(pixel - node));
-    return dot * field * weight;
+    return dot * smoothstep(0.0, 0.85, radius) * weight;
 }
 
 // The same fixed grid responds to one expanding drop wavefront. Only dot size
@@ -161,8 +159,7 @@ fn trail_dots(pixel: vec2<f32>, start: vec2<f32>, end: vec2<f32>,
     let node = (floor(pixel / 16.0) + vec2<f32>(0.5)) * 16.0;
     let t = segment_fraction(node, start, end);
     let age = mix(start_age, end_age, t);
-    let life = pow(max(1.0 - age / 1.2, 0.0), 2.0);
-    return signal_dots(pixel, mix(start, end, t), 185.0 + age * 55.0, life * 0.40, age, 0.0);
+    return signal_dots(pixel, mix(start, end, t), 110.0, 0.40, age);
 }
 
 // The signal shader blurs and refracts the framebuffer under broad, fading
@@ -186,7 +183,7 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
                                     vec2<f32>(165.0, 205.0), 0.34, effect.hover.w * 0.5 + 1.6);
         offset += primary.xy + satellite.xy;
         energy += primary.z + satellite.z;
-        dots = max(dots, signal_dots(pixel, center, 190.0, 0.58, 0.0, effect.hover.w * 2.4));
+        dots = max(dots, signal_dots(pixel, center, 125.0, 0.58, 0.0));
     }
     var previous = effect.hover.xy * dimensions;
     var previous_age = 0.0;
@@ -220,7 +217,7 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
         let ring = liquid_ring(pixel, center, radius, width, life * 1.15);
         offset += blob.xy + ring.xy;
         energy += blob.z + ring.z;
-        dots = max(dots, signal_dots(pixel, center, 90.0 + age * 80.0, life * 0.16, age, 0.0));
+        dots = max(dots, signal_dots(pixel, center, 90.0 + age * 80.0, life * 0.16, age));
         dots = max(dots, signal_ring_dots(pixel, center, radius, width, life * 0.68));
     }
     if (energy < 0.001 && dots < 0.001) { return original; }
