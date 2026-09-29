@@ -92,6 +92,20 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
     return mix(original, refracted, edge_fade);
 }
 
+// Screen-space interference nodes. A stable grid keeps the trail legible while
+// its local size and brightness respond to the moving distortion field.
+fn signal_dots(pixel: vec2<f32>, center: vec2<f32>, reach: f32, weight: f32) -> f32 {
+    let cell = floor(pixel / 13.0);
+    let node = (cell + vec2<f32>(0.5)) * 13.0
+        + vec2<f32>(sin(cell.y * 1.73 + cell.x * 0.31),
+                    cos(cell.x * 1.29 - cell.y * 0.47)) * 1.2;
+    let distance = length((node - center) * vec2<f32>(1.0, 1.2));
+    let field = exp(-pow(distance / reach, 2.0));
+    let diameter = 1.0 + field * 1.65;
+    let dot = 1.0 - smoothstep(diameter - 0.55, diameter + 0.55, length(pixel - node));
+    return dot * field * weight;
+}
+
 // Digital fluid: directional interference breaks the circles into irregular
 // facets, while the frame remains intact outside the nominated region.
 @fragment
@@ -105,6 +119,7 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
     let pixel = input.uv * dimensions;
     var offset = vec2<f32>(0.0);
     var energy = 0.0;
+    var dots = 0.0;
     if (effect.hover.z > 0.5) {
         let delta = pixel - effect.hover.xy * dimensions;
         let warped_radius = length(delta * vec2<f32>(1.0, 1.34))
@@ -114,6 +129,7 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
         offset += vec2<f32>(sin(warped_radius * 0.18 + delta.y * 0.04),
                             cos(warped_radius * 0.14 - delta.x * 0.035)) * pulse * 2.3;
         energy += pulse * 0.55;
+        dots = max(dots, signal_dots(pixel, effect.hover.xy * dimensions, 74.0, 0.42));
     }
     for (var i = 0u; i < 4u; i += 1u) {
         let wake = effect.wakes[i];
@@ -126,6 +142,8 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
             offset += vec2<f32>(sin(radius * 0.17 + delta.y * 0.05),
                                 cos(radius * 0.14 - delta.x * 0.03)) * pulse * 4.4;
             energy += pulse;
+            dots = max(dots, signal_dots(pixel, wake.xy * dimensions,
+                                        65.0 + wake.z * 32.0, life * wake.w * 0.32));
         }
     }
     if (effect.impact.w > 0.5 && effect.impact.z < 1.15) {
@@ -138,8 +156,10 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
         offset += vec2<f32>(sin(radius * 0.23 + delta.y * 0.06),
                             cos(radius * 0.21 - delta.x * 0.04)) * pulse * 6.2;
         energy += pulse * 1.6;
+        dots = max(dots, signal_dots(pixel, effect.impact.xy * dimensions,
+                                    55.0 + age * 150.0, life * 0.48));
     }
-    if (energy < 0.001) { return original; }
+    if (energy < 0.001 && dots < 0.001) { return original; }
     let lower = effect.region.xy * dimensions + vec2<f32>(1.0);
     let upper = effect.region.zw * dimensions - vec2<f32>(1.0);
     let edge_distance = min(min(pixel.x - lower.x, upper.x - pixel.x),
@@ -151,5 +171,7 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
     let r = textureSampleLevel(scene, scene_sampler, (shifted + fringe) / dimensions, 0.0);
     let g = textureSampleLevel(scene, scene_sampler, shifted / dimensions, 0.0);
     let b = textureSampleLevel(scene, scene_sampler, (shifted - fringe) / dimensions, 0.0);
-    return mix(original, vec4<f32>(r.r, g.g, b.b, g.a), fade);
+    let refracted = mix(original, vec4<f32>(r.r, g.g, b.b, g.a), fade);
+    let dot_color = vec3<f32>(0.67, 0.75, 0.80);
+    return vec4<f32>(mix(refracted.rgb, dot_color, min(dots * fade, 0.48)), refracted.a);
 }
