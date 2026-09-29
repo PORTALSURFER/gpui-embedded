@@ -1,3 +1,4 @@
+use crate::post_process::{PostEffect, PostProcessor};
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
@@ -120,6 +121,7 @@ struct WgpuResources {
     path_intermediate_view: Option<wgpu::TextureView>,
     path_msaa_texture: Option<wgpu::Texture>,
     path_msaa_view: Option<wgpu::TextureView>,
+    post_processor: Option<PostProcessor>,
 }
 
 impl WgpuResources {
@@ -128,6 +130,9 @@ impl WgpuResources {
         self.path_intermediate_view = None;
         self.path_msaa_texture = None;
         self.path_msaa_view = None;
+        if let Some(post) = self.post_processor.as_mut() {
+            post.invalidate();
+        }
     }
 }
 
@@ -158,6 +163,7 @@ pub struct WgpuRenderer {
     device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
     surface_configured: bool,
     needs_redraw: bool,
+    post_effects: Vec<PostEffect>,
 }
 
 impl WgpuRenderer {
@@ -490,6 +496,7 @@ impl WgpuRenderer {
             path_intermediate_view: None,
             path_msaa_texture: None,
             path_msaa_view: None,
+            post_processor: None,
         };
 
         Ok(Self {
@@ -515,7 +522,16 @@ impl WgpuRenderer {
             device_lost: context.device_lost_flag(),
             surface_configured: true,
             needs_redraw: false,
+            post_effects: Vec::new(),
         })
+    }
+
+    /// Configure ordered, potentially overlapping framebuffer effects.
+    /// Each effect reads the preceding effect's output. An empty list bypasses post-processing.
+    pub fn set_post_effects(&mut self, effects: &[PostEffect]) {
+        self.post_effects.clear();
+        self.post_effects
+            .extend(effects.iter().copied().filter(PostEffect::valid));
     }
 
     fn create_bind_group_layouts(device: &wgpu::Device) -> WgpuBindGroupLayouts {
@@ -1224,6 +1240,19 @@ impl WgpuRenderer {
             .or_else(|| frame.as_ref().map(|frame| &frame.texture))
             .expect("render target exists");
         let frame_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let has_post_effects = !self.post_effects.is_empty();
+        let scene_view = if has_post_effects {
+            let width = self.surface_config.width;
+            let height = self.surface_config.height;
+            let format = self.surface_config.format;
+            let resources = self.resources_mut();
+            let post = resources
+                .post_processor
+                .get_or_insert_with(|| PostProcessor::new(&resources.device, format));
+            post.scene_view(&resources.device, width, height).clone()
+        } else {
+            frame_view.clone()
+        };
 
         let gamma_params = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,
@@ -1287,7 +1316,7 @@ impl WgpuRenderer {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("main_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &frame_view,
+                        view: &scene_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -1326,7 +1355,7 @@ impl WgpuRenderer {
                             pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                 label: Some("main_pass_continued"),
                                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: &frame_view,
+                                    view: &scene_view,
                                     resolve_target: None,
                                     ops: wgpu::Operations {
                                         load: wgpu::LoadOp::Load,
@@ -1401,6 +1430,22 @@ impl WgpuRenderer {
                 }
                 self.grow_instance_buffer();
                 continue;
+            }
+
+            if has_post_effects {
+                let effects = self.post_effects.clone();
+                let resources = self.resources_mut();
+                resources
+                    .post_processor
+                    .as_mut()
+                    .expect("active post effect")
+                    .composite_stack(
+                        &resources.device,
+                        &mut encoder,
+                        &resources.queue,
+                        &frame_view,
+                        &effects,
+                    );
             }
 
             self.resources()
