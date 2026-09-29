@@ -95,14 +95,14 @@ fn fs_water(input: VertexOut) -> @location(0) vec4<f32> {
 // Screen-space interference nodes. A stable grid keeps the trail legible while
 // its local size and brightness respond to the moving distortion field.
 fn signal_dots(pixel: vec2<f32>, center: vec2<f32>, reach: f32, weight: f32) -> f32 {
-    let cell = floor(pixel / 13.0);
-    let node = (cell + vec2<f32>(0.5)) * 13.0
+    let cell = floor(pixel / 15.0);
+    let node = (cell + vec2<f32>(0.5)) * 15.0
         + vec2<f32>(sin(cell.y * 1.73 + cell.x * 0.31),
                     cos(cell.x * 1.29 - cell.y * 0.47)) * 1.2;
     let distance = length((node - center) * vec2<f32>(1.0, 1.2));
     let field = exp(-pow(distance / reach, 2.0));
-    let diameter = 1.0 + field * 1.65;
-    let dot = 1.0 - smoothstep(diameter - 0.55, diameter + 0.55, length(pixel - node));
+    let radius = 1.6 + field * 2.5;
+    let dot = 1.0 - smoothstep(radius - 0.65, radius + 0.65, length(pixel - node));
     return dot * field * weight;
 }
 
@@ -125,11 +125,11 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
         let warped_radius = length(delta * vec2<f32>(1.0, 1.34))
             + sin(delta.y * 0.066 + effect.hover.w * 2.0) * 5.0
             + sin(delta.x * 0.039 - delta.y * 0.027) * 3.0;
-        let pulse = exp(-pow((warped_radius - 30.0 - sin(effect.hover.w * 2.1) * 7.0) / 46.0, 2.0));
+        let pulse = exp(-pow((warped_radius - 42.0 - sin(effect.hover.w * 2.1) * 9.0) / 68.0, 2.0));
         offset += vec2<f32>(sin(warped_radius * 0.18 + delta.y * 0.04),
-                            cos(warped_radius * 0.14 - delta.x * 0.035)) * pulse * 2.3;
+                            cos(warped_radius * 0.14 - delta.x * 0.035)) * pulse * 3.0;
         energy += pulse * 0.55;
-        dots = max(dots, signal_dots(pixel, effect.hover.xy * dimensions, 74.0, 0.42));
+        dots = max(dots, signal_dots(pixel, effect.hover.xy * dimensions, 108.0, 0.52));
     }
     for (var i = 0u; i < 4u; i += 1u) {
         let wake = effect.wakes[i];
@@ -138,12 +138,12 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
             let radius = length(delta * vec2<f32>(1.0, 1.26))
                 + sin(delta.x * 0.042 + delta.y * 0.075) * 6.0;
             let life = pow(max(1.0 - wake.z / 1.2, 0.0), 2.0);
-            let pulse = exp(-pow((radius - wake.z * 105.0) / 30.0, 2.0)) * life * wake.w;
+            let pulse = exp(-pow((radius - wake.z * 132.0) / 44.0, 2.0)) * life * wake.w;
             offset += vec2<f32>(sin(radius * 0.17 + delta.y * 0.05),
-                                cos(radius * 0.14 - delta.x * 0.03)) * pulse * 4.4;
+                                cos(radius * 0.14 - delta.x * 0.03)) * pulse * 5.2;
             energy += pulse;
             dots = max(dots, signal_dots(pixel, wake.xy * dimensions,
-                                        65.0 + wake.z * 32.0, life * wake.w * 0.32));
+                                        92.0 + wake.z * 44.0, life * wake.w * 0.42));
         }
     }
     if (effect.impact.w > 0.5 && effect.impact.z < 1.15) {
@@ -152,12 +152,12 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
         let radius = length(delta * vec2<f32>(1.0, 1.18))
             + sin(delta.x * 0.055 - delta.y * 0.08) * 8.0;
         let life = pow(max(1.0 - age / 1.15, 0.0), 2.0);
-        let pulse = exp(-pow((radius - age * 185.0) / 26.0, 2.0)) * life;
+        let pulse = exp(-pow((radius - age * 225.0) / 38.0, 2.0)) * life;
         offset += vec2<f32>(sin(radius * 0.23 + delta.y * 0.06),
-                            cos(radius * 0.21 - delta.x * 0.04)) * pulse * 6.2;
+                            cos(radius * 0.21 - delta.x * 0.04)) * pulse * 7.0;
         energy += pulse * 1.6;
         dots = max(dots, signal_dots(pixel, effect.impact.xy * dimensions,
-                                    55.0 + age * 150.0, life * 0.48));
+                                    82.0 + age * 185.0, life * 0.58));
     }
     if (energy < 0.001 && dots < 0.001) { return original; }
     let lower = effect.region.xy * dimensions + vec2<f32>(1.0);
@@ -165,7 +165,7 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
     let edge_distance = min(min(pixel.x - lower.x, upper.x - pixel.x),
                             min(pixel.y - lower.y, upper.y - pixel.y));
     let fade = smoothstep(0.0, 12.0, edge_distance);
-    let shifted = clamp(pixel - clamp(offset, vec2<f32>(-8.0), vec2<f32>(8.0)) * fade,
+    let shifted = clamp(pixel - clamp(offset, vec2<f32>(-10.0), vec2<f32>(10.0)) * fade,
                         lower, upper);
     let fringe = normalize(offset + vec2<f32>(0.001)) * min(energy, 1.0) * fade * 1.5;
     let r = textureSampleLevel(scene, scene_sampler, (shifted + fringe) / dimensions, 0.0);
