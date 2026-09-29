@@ -124,7 +124,7 @@ fn liquid_blob(pixel: vec2<f32>, center: vec2<f32>, axes: vec2<f32>,
     let cloud = exp(-dot(local, local) * 1.45) * weight;
     let flow = vec2<f32>(local.x + sin(local.y * 2.0 + phase) * 0.24,
                          local.y + cos(local.x * 1.8 - phase) * 0.20);
-    return vec3<f32>(flow * cloud * 11.0, cloud);
+    return vec3<f32>(flow * cloud * 34.0, cloud);
 }
 
 fn liquid_ring(pixel: vec2<f32>, center: vec2<f32>,
@@ -133,7 +133,33 @@ fn liquid_ring(pixel: vec2<f32>, center: vec2<f32>,
     let distance = length(delta * vec2<f32>(1.0, 1.15));
     let wavefront = exp(-pow((distance - radius) / width, 2.0)) * weight;
     let direction = delta / max(length(delta), 1.0);
-    return vec3<f32>(direction * wavefront * 10.0, wavefront);
+    return vec3<f32>(direction * wavefront * 32.0, wavefront);
+}
+
+// Analytic capsules join recorded positions, including jumps spanning a whole
+// frame. Their Gaussian cross-section has no separated stamp boundaries.
+fn segment_fraction(pixel: vec2<f32>, start: vec2<f32>, end: vec2<f32>) -> f32 {
+    let delta = end - start;
+    return clamp(dot(pixel - start, delta) / max(dot(delta, delta), 0.001), 0.0, 1.0);
+}
+
+fn liquid_trail(pixel: vec2<f32>, start: vec2<f32>, end: vec2<f32>,
+                start_age: f32, end_age: f32) -> vec3<f32> {
+    let t = segment_fraction(pixel, start, end);
+    let age = mix(start_age, end_age, t);
+    let life = pow(max(1.0 - age / 1.2, 0.0), 2.0);
+    return liquid_blob(pixel, mix(start, end, t),
+                       vec2<f32>(210.0 + age * 70.0, 168.0 + age * 55.0),
+                       life * 0.62, age * 1.2);
+}
+
+fn trail_dots(pixel: vec2<f32>, start: vec2<f32>, end: vec2<f32>,
+              start_age: f32, end_age: f32) -> f32 {
+    let node = (floor(pixel / 16.0) + vec2<f32>(0.5)) * 16.0;
+    let t = segment_fraction(node, start, end);
+    let age = mix(start_age, end_age, t);
+    let life = pow(max(1.0 - age / 1.2, 0.0), 2.0);
+    return signal_dots(pixel, mix(start, end, t), 185.0 + age * 55.0, life * 0.40);
 }
 
 // The signal shader blurs and refracts the framebuffer under broad, fading
@@ -152,32 +178,39 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
     var dots = 0.0;
     if (effect.hover.z > 0.5) {
         let center = effect.hover.xy * dimensions;
-        let primary = liquid_blob(pixel, center, vec2<f32>(150.0, 118.0), 0.95, effect.hover.w * 0.7);
+        let primary = liquid_blob(pixel, center, vec2<f32>(225.0, 180.0), 0.95, effect.hover.w * 0.7);
         let satellite = liquid_blob(pixel, center + vec2<f32>(38.0, -28.0),
-                                    vec2<f32>(105.0, 140.0), 0.34, effect.hover.w * 0.5 + 1.6);
+                                    vec2<f32>(165.0, 205.0), 0.34, effect.hover.w * 0.5 + 1.6);
         offset += primary.xy + satellite.xy;
         energy += primary.z + satellite.z;
-        dots = max(dots, signal_dots(pixel, center, 125.0, 0.58));
+        dots = max(dots, signal_dots(pixel, center, 190.0, 0.58));
     }
+    var previous = effect.hover.xy * dimensions;
+    var previous_age = 0.0;
+    var previous_valid = effect.hover.z > 0.5;
     for (var i = 0u; i < 4u; i += 1u) {
         let wake = effect.wakes[i];
         if (wake.w > 0.0 && wake.z < 1.2) {
-            let life = pow(max(1.0 - wake.z / 1.2, 0.0), 2.0) * wake.w;
             let center = wake.xy * dimensions;
-            let blob = liquid_blob(pixel, center,
-                                   vec2<f32>(122.0 + wake.z * 42.0, 92.0 + wake.z * 34.0),
-                                   life * 0.67, wake.z * 1.7);
+            if (!previous_valid) {
+                previous = center;
+                previous_age = wake.z;
+                previous_valid = true;
+            }
+            let blob = liquid_trail(pixel, previous, center, previous_age, wake.z);
             offset += blob.xy;
             energy += blob.z;
-            dots = max(dots, signal_dots(pixel, center, 108.0 + wake.z * 42.0, life * 0.46));
+            dots = max(dots, trail_dots(pixel, previous, center, previous_age, wake.z));
+            previous = center;
+            previous_age = wake.z;
         }
     }
     if (effect.impact.w > 0.5 && effect.impact.z < 1.45) {
         let age = effect.impact.z;
         let life = pow(max(1.0 - age / 1.45, 0.0), 1.5);
         let center = effect.impact.xy * dimensions;
-        let radius = age * 280.0;
-        let width = 58.0 + age * 24.0;
+        let radius = age * 500.0;
+        let width = 92.0 + age * 38.0;
         let blob = liquid_blob(pixel, center,
                                vec2<f32>(110.0 + age * 105.0, 90.0 + age * 78.0),
                                life * 0.55, age * 2.4);
@@ -194,7 +227,7 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
     let edge_distance = min(min(pixel.x - lower.x, upper.x - pixel.x),
                             min(pixel.y - lower.y, upper.y - pixel.y));
     let fade = smoothstep(0.0, 16.0, edge_distance);
-    let shifted = clamp(pixel - clamp(offset, vec2<f32>(-12.0), vec2<f32>(12.0)) * fade,
+    let shifted = clamp(pixel - clamp(offset / max(energy, 1.0), vec2<f32>(-38.0), vec2<f32>(38.0)) * fade,
                         lower, upper);
     let blur = min(energy, 1.0) * fade * 8.0;
     let uv_min = effect.region.xy;
@@ -209,13 +242,13 @@ fn fs_signal(input: VertexOut) -> @location(0) vec4<f32> {
     let tap_y2 = textureSampleLevel(scene, scene_sampler,
                                    clamp((shifted - vec2<f32>(0.0, blur)) / dimensions, uv_min, uv_max), 0.0);
     let softened = base * 0.24 + (tap_x1 + tap_x2 + tap_y1 + tap_y2) * 0.19;
-    let fringe = normalize(offset + vec2<f32>(0.001)) * min(energy, 1.0) * fade * 1.25;
+    let fringe = normalize(offset + vec2<f32>(0.001)) * min(energy, 1.0) * fade * 14.0;
     let red = textureSampleLevel(scene, scene_sampler,
                                  clamp((shifted + fringe) / dimensions, uv_min, uv_max), 0.0);
     let blue = textureSampleLevel(scene, scene_sampler,
                                   clamp((shifted - fringe) / dimensions, uv_min, uv_max), 0.0);
-    let liquid = vec4<f32>(mix(red.r, softened.r, 0.65), softened.g,
-                           mix(blue.b, softened.b, 0.65), softened.a);
+    let liquid = vec4<f32>(mix(red.r, softened.r, 0.22), softened.g,
+                           mix(blue.b, softened.b, 0.22), softened.a);
     let refracted = mix(original, liquid, fade);
     let dot_color = vec3<f32>(0.67, 0.75, 0.80);
     return vec4<f32>(mix(refracted.rgb, dot_color, min(dots * fade, 0.52)), refracted.a);
