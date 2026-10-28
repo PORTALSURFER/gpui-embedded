@@ -584,7 +584,7 @@ fn create_buffer_pool(
 }
 
 #[cfg(target_os = "macos")]
-pub type RemoteVideoFrame = core_video::pixel_buffer::CVPixelBuffer;
+pub type RemoteVideoFrame = objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>;
 
 #[cfg(target_os = "macos")]
 fn video_frame_buffer_from_webrtc(
@@ -592,7 +592,7 @@ fn video_frame_buffer_from_webrtc(
     buffer: Box<dyn VideoBuffer>,
 ) -> Option<RemoteVideoFrame> {
     use core_foundation::base::TCFType;
-    use core_video::{pixel_buffer::CVPixelBuffer, r#return::kCVReturnSuccess};
+    use core_video::r#return::kCVReturnSuccess;
     use livekit::webrtc::native::yuv_helper::i420_to_nv12;
 
     if let Some(native) = buffer.as_native() {
@@ -600,7 +600,12 @@ fn video_frame_buffer_from_webrtc(
         if pixel_buffer.is_null() {
             return None;
         }
-        return unsafe { Some(CVPixelBuffer::wrap_under_get_rule(pixel_buffer as _)) };
+        // SAFETY: WebRTC supplies a live Core Video buffer; retain it for the frame.
+        return unsafe {
+            Some(objc2_core_foundation::CFRetained::retain(
+                std::ptr::NonNull::new(pixel_buffer.cast())?,
+            ))
+        };
     }
 
     let i420_buffer = buffer.as_i420()?;
@@ -646,7 +651,13 @@ fn video_frame_buffer_from_webrtc(
         pixel_buffer
     };
 
-    Some(image_buffer)
+    // SAFETY: The Core Video object is live and retained by image_buffer here.
+    let retained = unsafe {
+        objc2_core_foundation::CFRetained::retain(std::ptr::NonNull::new(
+            image_buffer.as_concrete_TypeRef().cast(),
+        )?)
+    };
+    Some(retained)
 }
 
 #[cfg(not(target_os = "macos"))]

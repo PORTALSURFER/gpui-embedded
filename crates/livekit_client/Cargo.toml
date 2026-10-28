@@ -60,6 +60,8 @@ core-foundation.workspace = true
 core-video.workspace = true
 coreaudio-rs = "0.12.1"
 objc.workspace = true
+objc2-core-foundation = { version = "=0.3.2", default-features = false }
+objc2-core-video = { version = "=0.3.2", default-features = false, features = ["CVBuffer", "CVImageBuffer", "CVPixelBuffer"] }
 
 [dev-dependencies]
 collections = { workspace = true, features = ["test-support"] }
