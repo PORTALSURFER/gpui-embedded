@@ -3,7 +3,9 @@ use crate::{
     ObjectFit, Pixels, Style, StyleRefinement, Styled, Window,
 };
 #[cfg(target_os = "macos")]
-use core_video::pixel_buffer::CVPixelBuffer;
+use objc2_core_foundation::CFRetained;
+#[cfg(target_os = "macos")]
+use objc2_core_video::{CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth};
 use refineable::Refineable;
 
 /// A source of a surface's content.
@@ -11,12 +13,12 @@ use refineable::Refineable;
 pub enum SurfaceSource {
     /// A macOS image buffer from CoreVideo
     #[cfg(target_os = "macos")]
-    Surface(CVPixelBuffer),
+    Surface(CFRetained<CVPixelBuffer>),
 }
 
 #[cfg(target_os = "macos")]
-impl From<CVPixelBuffer> for SurfaceSource {
-    fn from(value: CVPixelBuffer) -> Self {
+impl From<CFRetained<CVPixelBuffer>> for SurfaceSource {
+    fn from(value: CFRetained<CVPixelBuffer>) -> Self {
         SurfaceSource::Surface(value)
     }
 }
@@ -95,7 +97,10 @@ impl Element for Surface {
         match &self.source {
             #[cfg(target_os = "macos")]
             SurfaceSource::Surface(surface) => {
-                let size = crate::size(surface.get_width().into(), surface.get_height().into());
+                let size = crate::size(
+                    CVPixelBufferGetWidth(surface).into(),
+                    CVPixelBufferGetHeight(surface).into(),
+                );
                 let new_bounds = self.object_fit.get_bounds(bounds, size);
                 // TODO: Add support for corner_radii
                 window.paint_surface(new_bounds, surface.clone());
@@ -117,5 +122,40 @@ impl IntoElement for Surface {
 impl Styled for Surface {
     fn style(&mut self) -> &mut StyleRefinement {
         &mut self.style
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::SurfaceSource;
+    use objc2_core_foundation::CFRetained;
+    use objc2_core_video::{
+        CVPixelBufferCreate, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
+        kCVPixelFormatType_32BGRA, kCVReturnSuccess,
+    };
+    use std::ptr::NonNull;
+
+    #[test]
+    fn surface_keeps_pixel_buffer_alive_after_original_is_dropped() {
+        let mut buffer = std::ptr::null_mut();
+        // SAFETY: The output pointer is valid and no attributes are provided.
+        let status = unsafe {
+            CVPixelBufferCreate(
+                None,
+                23,
+                17,
+                kCVPixelFormatType_32BGRA,
+                None,
+                NonNull::from(&mut buffer),
+            )
+        };
+        assert_eq!(status, kCVReturnSuccess);
+        // SAFETY: A successful create returns an owned Core Video object.
+        let buffer = unsafe { CFRetained::from_raw(NonNull::new(buffer).unwrap()) };
+        let source = SurfaceSource::from(buffer.clone());
+        drop(buffer);
+        let SurfaceSource::Surface(buffer) = source;
+        assert_eq!(CVPixelBufferGetWidth(&buffer), 23);
+        assert_eq!(CVPixelBufferGetHeight(&buffer), 17);
     }
 }

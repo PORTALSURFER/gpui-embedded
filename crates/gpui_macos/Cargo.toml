@@ -52,6 +52,7 @@ media.workspace = true
 metal.workspace = true
 objc.workspace = true
 objc2.workspace = true
+objc2-core-foundation = { version = "=0.3.2", default-features = false }
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
 parking_lot.workspace = true
