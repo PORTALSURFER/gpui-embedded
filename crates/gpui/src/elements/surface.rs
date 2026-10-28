@@ -124,3 +124,38 @@ impl Styled for Surface {
         &mut self.style
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::SurfaceSource;
+    use objc2_core_foundation::CFRetained;
+    use objc2_core_video::{
+        CVPixelBufferCreate, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
+        kCVPixelFormatType_32BGRA, kCVReturnSuccess,
+    };
+    use std::ptr::NonNull;
+
+    #[test]
+    fn surface_keeps_pixel_buffer_alive_after_original_is_dropped() {
+        let mut buffer = std::ptr::null_mut();
+        // SAFETY: The output pointer is valid and no attributes are provided.
+        let status = unsafe {
+            CVPixelBufferCreate(
+                None,
+                23,
+                17,
+                kCVPixelFormatType_32BGRA,
+                None,
+                NonNull::from(&mut buffer),
+            )
+        };
+        assert_eq!(status, kCVReturnSuccess);
+        // SAFETY: A successful create returns an owned Core Video object.
+        let buffer = unsafe { CFRetained::from_raw(NonNull::new(buffer).unwrap()) };
+        let source = SurfaceSource::from(buffer.clone());
+        drop(buffer);
+        let SurfaceSource::Surface(buffer) = source;
+        assert_eq!(CVPixelBufferGetWidth(&buffer), 23);
+        assert_eq!(CVPixelBufferGetHeight(&buffer), 17);
+    }
+}
